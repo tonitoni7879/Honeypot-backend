@@ -22,7 +22,6 @@ GUVI_CALLBACK_URL = "https://hackathon.guvi.in/api/updateHoneyPotFinalResult"
 
 memory = {}
 
-
 # ================= AUTH =================
 
 def require_api_key(f):
@@ -31,8 +30,8 @@ def require_api_key(f):
 
         key = request.headers.get("x-api-key")
 
-        if key != API_KEY:
-            return jsonify({"error": "Unauthorized"}), 401
+        if not key or key != API_KEY:
+            return jsonify({"status": "error", "message": "Unauthorized"}), 401
 
         return f(*args, **kwargs)
 
@@ -87,8 +86,10 @@ def extract(text):
 
 def reply(text, history):
 
+    text = text.lower()
+
     if "otp" in text:
-        return "I got an OTP. Is it safe to share?"
+        return "I just got an OTP. Is it safe to share?"
 
     if "bank" in text:
         return "Which bank is this?"
@@ -96,17 +97,26 @@ def reply(text, history):
     if "click" in text:
         return "What happens if I click?"
 
-    return "Please explain again."
+    replies = [
+        "Please explain again.",
+        "I am confused.",
+        "What should I do now?",
+        "Can you help me?"
+    ]
+
+    return replies[len(history) % len(replies)]
 
 
 # ================= HEALTH =================
 
-@app.route("/health")
+@app.route("/health", methods=["GET"])
 def health():
 
     return jsonify({
-        "status": "healthy"
-    })
+        "status": "healthy",
+        "service": "Honeypot API",
+        "time": datetime.utcnow().isoformat() + "Z"
+    }), 200
 
 
 # ================= MAIN API =================
@@ -117,61 +127,75 @@ def analyze():
 
     try:
 
-        # Never crash on bad JSON
+        # Safe JSON read
         data = request.get_json(silent=True)
 
         if not isinstance(data, dict):
-            data = {}
+            return jsonify({
+                "status": "error",
+                "message": "Invalid JSON body"
+            }), 400
 
-        logger.info(f"DATA: {data}")
+        logger.info(f"Incoming: {data}")
 
-        text = ""
+        # ---------------- Read message ----------------
 
-        # All formats
-        if "message" in data:
+        message = data.get("message", {})
 
-            if isinstance(data["message"], dict):
-                text = data["message"].get("text", "")
+        if not isinstance(message, dict):
+            return jsonify({
+                "status": "error",
+                "message": "Invalid message format"
+            }), 400
 
-            elif isinstance(data["message"], str):
-                text = data["message"]
+        text = message.get("text", "")
+        sender = message.get("sender", "scammer")
+        timestamp = message.get("timestamp")
 
-        elif "text" in data:
-            text = data["text"]
+        if not timestamp:
+            timestamp = datetime.utcnow().isoformat() + "Z"
 
-        # Fallback (GUVI case)
         if not text:
-            text = "Hello"
+            return jsonify({
+                "status": "error",
+                "message": "Missing message.text"
+            }), 400
 
-        session = data.get("sessionId", "default")
+        # ---------------- Session ----------------
+
+        session_id = data.get("sessionId", "default")
 
         history = data.get("conversationHistory", [])
 
+        if session_id not in memory:
+            memory[session_id] = []
+
         # Save user msg
         user_msg = {
-            "sender": "user",
+            "sender": sender,
             "text": text,
-            "time": datetime.utcnow().isoformat()
+            "timestamp": timestamp
         }
 
-        if session not in memory:
-            memory[session] = []
+        memory[session_id].append(user_msg)
 
-        memory[session].append(user_msg)
+        # ---------------- Process ----------------
 
-        # Detect
         fraud, conf = detect(text)
 
         intel = extract(text)
 
-        ai = reply(text, history)
+        ai_reply = reply(text, history)
 
-        memory[session].append({
+        # Save AI msg
+        memory[session_id].append({
             "sender": "ai",
-            "text": ai
+            "text": ai_reply,
+            "timestamp": datetime.utcnow().isoformat() + "Z"
         })
 
-        # Callback
+        # ---------------- Callback ----------------
+
         if fraud == "Fraud" and (
             intel["upiIds"] or
             intel["bankAccounts"] or
@@ -180,32 +204,34 @@ def analyze():
         ):
 
             payload = {
-                "sessionId": session,
+                "sessionId": session_id,
                 "scamDetected": True,
-                "totalMessagesExchanged": len(memory[session]),
+                "totalMessagesExchanged": len(memory[session_id]),
                 "extractedIntelligence": intel,
-                "agentNotes": "Scam detected"
+                "agentNotes": "Scam detected via keyword + behavior"
             }
 
             try:
                 requests.post(GUVI_CALLBACK_URL, json=payload, timeout=5)
-            except:
-                pass
+                logger.info("GUVI callback sent")
 
+            except Exception as e:
+                logger.error(f"Callback failed: {e}")
 
-        # GUVI NEEDS THIS FORMAT
+        # ---------------- Response ----------------
+
         return jsonify({
             "status": "success",
-            "reply": ai,
+            "reply": ai_reply,
             "fraud_status": fraud,
             "confidence": conf,
             "extractedIntelligence": intel
-        })
+        }), 200
 
 
     except Exception as e:
 
-        logger.exception("ERROR")
+        logger.exception("Analyze error")
 
         return jsonify({
             "status": "error",
@@ -221,5 +247,6 @@ if __name__ == "__main__":
 
     app.run(
         host="0.0.0.0",
-        port=port
+        port=port,
+        debug=True
     )
