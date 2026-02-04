@@ -193,11 +193,21 @@ def analyze():
 
         data = request.get_json()
 
-        if not data or "message" not in data:
-            return jsonify({
-                "status": "error",
-                "message": "Invalid input"
-            }), 400
+        # Flexible input handling for GUVI
+data = request.get_json() or {}
+
+        # Try multiple formats
+        if 'message' in data and isinstance(data['message'], dict):
+            message_text = data['message'].get('text', '')
+        elif 'text' in data:
+            message_text = data.get('text', '')
+        elif 'message' in data and isinstance(data['message'], str):
+            message_text = data['message']
+        else:
+            message_text = str(data)
+
+        if not message_text:
+            message_text = "Hello"
 
         session_id = data.get("sessionId", "default")
         msg = data["message"]
