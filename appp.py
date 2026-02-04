@@ -8,7 +8,7 @@ import logging
 import requests
 from functools import wraps
 
-# ==================== CONFIG ====================
+# ================= CONFIG =================
 
 app = Flask(__name__)
 CORS(app)
@@ -17,14 +17,12 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 VALID_API_KEY = os.environ.get("API_KEY", "demo123")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 
 GUVI_CALLBACK_URL = "https://hackathon.guvi.in/api/updateHoneyPotFinalResult"
 
 conversation_memory = {}
 
-
-# ==================== AUTH ====================
+# ================= AUTH =================
 
 def require_api_key(f):
     @wraps(f)
@@ -43,7 +41,7 @@ def require_api_key(f):
     return wrapper
 
 
-# ==================== KEYWORDS ====================
+# ================= KEYWORDS =================
 
 SCAM_KEYWORDS = [
     "urgent", "verify", "blocked", "suspended", "otp", "cvv",
@@ -52,12 +50,11 @@ SCAM_KEYWORDS = [
 ]
 
 
-# ==================== SCAM DETECTOR ====================
+# ================= SCAM DETECTOR =================
 
 def detect_scam(text):
 
     text = text.lower()
-
     score = 0
 
     for k in SCAM_KEYWORDS:
@@ -73,7 +70,7 @@ def detect_scam(text):
     return "Unknown", 50
 
 
-# ==================== INTEL EXTRACTION ====================
+# ================= INTEL EXTRACTION =================
 
 def extract_intelligence(text):
 
@@ -85,23 +82,11 @@ def extract_intelligence(text):
         "suspiciousKeywords": []
     }
 
-    # UPI
-    upi = re.findall(r"\b[\w\.-]+@[\w\.-]+\b", text)
-    intel["upiIds"] = upi
+    intel["upiIds"] = re.findall(r"\b[\w\.-]+@[\w\.-]+\b", text)
+    intel["phoneNumbers"] = re.findall(r"(?:\+91)?[6-9]\d{9}", text)
+    intel["phishingLinks"] = re.findall(r"https?://[^\s]+", text)
+    intel["bankAccounts"] = re.findall(r"\b\d{9,18}\b", text)
 
-    # Phone
-    phone = re.findall(r"(?:\+91)?[6-9]\d{9}", text)
-    intel["phoneNumbers"] = phone
-
-    # Links
-    urls = re.findall(r"https?://[^\s]+", text)
-    intel["phishingLinks"] = urls
-
-    # Bank numbers
-    acc = re.findall(r"\b\d{9,18}\b", text)
-    intel["bankAccounts"] = acc
-
-    # Keywords
     for k in SCAM_KEYWORDS:
         if k in text.lower():
             intel["suspiciousKeywords"].append(k)
@@ -109,7 +94,7 @@ def extract_intelligence(text):
     return intel
 
 
-# ==================== AI REPLY ====================
+# ================= AI REPLY =================
 
 def generate_ai_reply(text, history):
 
@@ -138,7 +123,7 @@ def generate_ai_reply(text, history):
     return replies[len(history) % len(replies)]
 
 
-# ==================== GUVI CALLBACK ====================
+# ================= GUVI CALLBACK =================
 
 def send_final_result(session_id, intel, total):
 
@@ -158,20 +143,7 @@ def send_final_result(session_id, intel, total):
         logger.error(f"Callback Failed: {e}")
 
 
-# ==================== TEST ENDPOINT (GUVI) ====================
-
-@app.route("/api/test", methods=["GET"])
-@require_api_key
-def api_test():
-
-    return jsonify({
-        "status": "success",
-        "message": "Honeypot API working",
-        "timestamp": datetime.utcnow().isoformat() + "Z"
-    }), 200
-
-
-# ==================== HEALTH ====================
+# ================= HEALTH =================
 
 @app.route("/health", methods=["GET"])
 def health():
@@ -183,7 +155,7 @@ def health():
     }), 200
 
 
-# ==================== MAIN API ====================
+# ================= MAIN API =================
 
 @app.route("/api/analyze", methods=["POST"])
 @require_api_key
@@ -191,52 +163,49 @@ def analyze():
 
     try:
 
-        data = request.get_json()
+        data = request.get_json(silent=True) or {}
 
-        # Flexible input handling for GUVI
-data = request.get_json() or {}
+        message_text = ""
 
-        # Try multiple formats
-        if 'message' in data and isinstance(data['message'], dict):
-            message_text = data['message'].get('text', '')
-        elif 'text' in data:
-            message_text = data.get('text', '')
-        elif 'message' in data and isinstance(data['message'], str):
-            message_text = data['message']
-        else:
-            message_text = str(data)
+        if isinstance(data.get("message"), dict):
+            message_text = data["message"].get("text", "")
+
+        elif isinstance(data.get("message"), str):
+            message_text = data["message"]
+
+        elif "text" in data:
+            message_text = data.get("text", "")
 
         if not message_text:
             message_text = "Hello"
 
         session_id = data.get("sessionId", "default")
-        msg = data["message"]
+
         history = data.get("conversationHistory", [])
 
-        text = msg["text"]
+        msg_obj = {
+            "sender": "user",
+            "text": message_text,
+            "timestamp": datetime.utcnow().isoformat() + "Z"
+        }
 
         if session_id not in conversation_memory:
             conversation_memory[session_id] = []
 
-        conversation_memory[session_id].append(msg)
+        conversation_memory[session_id].append(msg_obj)
 
-        # Detect
-        fraud, confidence = detect_scam(text)
+        fraud, confidence = detect_scam(message_text)
 
-        # Extract
-        intel = extract_intelligence(text)
+        intel = extract_intelligence(message_text)
 
-        # AI Reply
-        reply = generate_ai_reply(text, history)
+        reply = generate_ai_reply(message_text, history)
 
-        # Store AI msg
         conversation_memory[session_id].append({
             "sender": "ai",
             "text": reply,
             "timestamp": datetime.utcnow().isoformat() + "Z"
         })
 
-        # Completion
         if fraud == "Fraud" and (
             intel["upiIds"] or
             intel["bankAccounts"] or
@@ -248,21 +217,18 @@ data = request.get_json() or {}
 
             send_final_result(session_id, intel, total)
 
-        # Response
-        response = {
+        return jsonify({
             "status": "success",
             "reply": reply,
             "fraud_status": fraud,
             "confidence": confidence,
             "extractedIntelligence": intel
-        }
-
-        return jsonify(response), 200
+        }), 200
 
 
     except Exception as e:
 
-        logger.error(e)
+        logger.exception(e)
 
         return jsonify({
             "status": "error",
@@ -270,7 +236,7 @@ data = request.get_json() or {}
         }), 500
 
 
-# ==================== SESSION ====================
+# ================= SESSION =================
 
 @app.route("/api/sessions/<sid>", methods=["GET"])
 @require_api_key
@@ -295,7 +261,7 @@ def delete_session(sid):
     return jsonify({"status": "deleted"})
 
 
-# ==================== RUN ====================
+# ================= RUN =================
 
 if __name__ == "__main__":
 
